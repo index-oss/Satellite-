@@ -1,0 +1,231 @@
+<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Advanced Satellite Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />  <!-- Leaflet CSS -->  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>  <!-- Satellite.js -->  <script src="https://unpkg.com/satellite.js/dist/satellite.min.js"></script>  <!-- Chart.js -->  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>  <!-- Filter Styling -->  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background: #000;
+      color: #fff;
+    }
+
+    #map {
+      height: 85vh;
+      width: 100%;
+    }
+
+    #panel {
+      height: 15vh;
+      background: #111;
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      font-size: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .info-block {
+      margin: 5px 10px;
+      text-align: center;
+    }
+
+    .info-label {
+      color: #aaa;
+      font-size: 0.85rem;
+    }
+
+    .info-value {
+      font-size: 1.1rem;
+      color: #0f0;
+    }
+
+    .filter-block {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .filter-block label {
+      font-size: 0.9rem;
+      color: #fff;
+    }
+
+    canvas {
+      background: #000;
+    }
+  </style></head>
+<body><div id="map"></div>
+<div id="panel">
+  <div class="info-block">
+    <div class="info-label">Nearest Satellite</div>
+    <div id="nearest" class="info-value">--</div>
+  </div>
+  <div class="filter-block">
+    <label><input type="checkbox" class="satFilter" value="ISS" checked> ISS</label>
+    <label><input type="checkbox" class="satFilter" value="NOAA" checked> NOAA</label>
+    <label><input type="checkbox" class="satFilter" value="HUBBLE" checked> Hubble</label>
+  </div>
+</div><script>
+const map = L.map("map", { worldCopyJump: true }).setView([0, 0], 2);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+const observer = { lat: 0, lng: 0, alt: 0 };
+const weatherApiKey = 'fb3d8e48edc733812b643b7482561cc9';
+
+const satellites = [
+  {
+    name: "ISS",
+    type: "ISS",
+    tle1: "1 25544U 98067A   24170.55668981  .00001671  00000+0  37678-4 0  9995",
+    tle2: "2 25544  51.6413 178.0067 0004687  37.0167  94.7752 15.50756007442520"
+  },
+  {
+    name: "NOAA 19",
+    type: "NOAA",
+    tle1: "1 33591U 09005A   24170.47502876  .00000167  00000+0  15838-3 0  9992",
+    tle2: "2 33591  99.1891 216.1451 0014322  82.1093 278.1973 14.12340422669949"
+  },
+  {
+    name: "Hubble",
+    type: "HUBBLE",
+    tle1: "1 20580U 90037B   24170.40482561  .00000610  00000+0  29036-4 0  9994",
+    tle2: "2 20580  28.4696 148.1130 0002733 263.0346  96.9996 15.11716066650979"
+  }
+];
+
+const svgColors = {
+  ISS: '#FFD700',
+  NOAA: '#00FFFF',
+  HUBBLE: '#FF00FF',
+  DEFAULT: '#00FF00'
+};
+
+const markers = {}, trails = {}, chartData = {};
+
+function createSVGIcon(color) {
+  return L.divIcon({
+    html: `<svg width='30' height='30' viewBox='0 0 64 64'><circle cx='32' cy='32' r='14' fill='${color}' stroke='white' stroke-width='2'/></svg>` ,
+    className: '',
+    iconSize: [30, 30],
+    iconAnchor: [15, 15]
+  });
+}
+
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function fetchWeather(lat, lon) {
+  return fetch(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${weatherApiKey}`)
+    .then(res => res.json())
+    .then(data => `${data.weather[0].description}, ${data.main.temp}°C`)
+    .catch(() => 'Weather unavailable');
+}
+
+function showPopup(sat, lat, lng, alt, speed) {
+  fetchWeather(lat, lng).then(weather => {
+    const popupContent = document.createElement('div');
+    popupContent.innerHTML = `
+      <strong>${sat.name}</strong><br>
+      Lat: ${lat.toFixed(2)}<br>Lng: ${lng.toFixed(2)}<br>
+      Altitude: ${alt.toFixed(1)} km<br>
+      Speed: ${speed.toFixed(1)} km/h<br>
+      Weather: ${weather}<br>
+    `;
+    const canvas = document.createElement('canvas');
+    canvas.width = 260;
+    canvas.height = 100;
+    popupContent.appendChild(canvas);
+    new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: chartData[sat.name]?.labels || [],
+        datasets: [{
+          label: 'Speed (km/h)',
+          data: chartData[sat.name]?.data || [],
+          borderColor: 'lime', fill: false, tension: 0.3
+        }]
+      },
+      options: {
+        plugins: { legend: { labels: { color: '#fff' } } },
+        scales: {
+          x: { ticks: { color: '#fff' } },
+          y: { ticks: { color: '#fff' } }
+        }
+      }
+    });
+    markers[sat.name].bindPopup(popupContent).openPopup();
+  });
+}
+
+function updateSatellites() {
+  const now = new Date();
+  let nearest = { name: null, dist: Infinity };
+  const activeFilters = [...document.querySelectorAll('.satFilter:checked')].map(cb => cb.value);
+
+  satellites.forEach(sat => {
+    if (!activeFilters.includes(sat.type)) return;
+
+    const satrec = satellite.twoline2satrec(sat.tle1, sat.tle2);
+    const pos = satellite.propagate(satrec, now);
+    const gmst = satellite.gstime(now);
+    const geo = satellite.eciToGeodetic(pos.position, gmst);
+    const lat = satellite.degreesLat(geo.latitude);
+    const lng = satellite.degreesLong(geo.longitude);
+    const alt = geo.height * 6371;
+    const speed = Math.sqrt(pos.velocity.x ** 2 + pos.velocity.y ** 2 + pos.velocity.z ** 2) * 3.6;
+
+    if (!chartData[sat.name]) chartData[sat.name] = { labels: [], data: [] };
+    if (chartData[sat.name].labels.length > 20) {
+      chartData[sat.name].labels.shift();
+      chartData[sat.name].data.shift();
+    }
+    chartData[sat.name].labels.push(now.toLocaleTimeString());
+    chartData[sat.name].data.push(speed);
+
+    const dist = getDistance(observer.lat, observer.lng, lat, lng);
+    if (dist < nearest.dist) nearest = { name: sat.name, dist: dist.toFixed(1) };
+
+    if (!markers[sat.name]) {
+      markers[sat.name] = L.marker([lat, lng], {
+        icon: createSVGIcon(svgColors[sat.type] || svgColors.DEFAULT)
+      }).addTo(map).on('click', () => showPopup(sat, lat, lng, alt, speed));
+    } else {
+      markers[sat.name].setLatLng([lat, lng]);
+    }
+
+    if (!trails[sat.name]) trails[sat.name] = L.polyline([], { color: svgColors[sat.type], weight: 1.5 }).addTo(map);
+    const path = trails[sat.name].getLatLngs();
+    path.push([lat, lng]);
+    if (path.length > 50) path.shift();
+    trails[sat.name].setLatLngs(path);
+  });
+
+  document.getElementById("nearest").textContent = `${nearest.name} (${nearest.dist} km)`;
+}
+
+navigator.geolocation.getCurrentPosition(pos => {
+  observer.lat = pos.coords.latitude;
+  observer.lng = pos.coords.longitude;
+  observer.alt = pos.coords.altitude || 0;
+  L.circleMarker([observer.lat, observer.lng], {
+    radius: 6,
+    color: 'red',
+    fillColor: 'red',
+    fillOpacity: 0.8
+  }).addTo(map).bindPopup("You are here");
+});
+
+setInterval(updateSatellites, 3000);
+updateSatellites();
+</script></body>
+</html>
